@@ -8,6 +8,7 @@
 #include <boost/asio/detached.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_future.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
@@ -127,36 +128,33 @@ private:
 	/// \brief Handles writing outgoing messages to the websocket as soon as
 	/// they become available.
 	boost::asio::awaitable<void> write_loop() {
-		try {
-			while ( true ) {
-				const auto tx_message = co_await get_next_tx_message();
+		boost::system::error_code ec;
 
-				co_await stream().async_write(boost::asio::buffer(tx_message), boost::asio::use_awaitable);
-			} // while ( ... )
-		} catch ( ... ) {
-			close();
-			throw;
-		}
+		while ( !ec ) {
+			const auto tx_message = co_await get_next_tx_message();
+
+			co_await stream().async_write(boost::asio::buffer(tx_message), boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+		} // while ( ... )
 	}
 
 	/// Handles reading incoming messages.
 	boost::asio::awaitable<void> read_loop() {
-		try {
-			boost::beast::flat_buffer rx_buffer;
+		boost::beast::flat_buffer rx_buffer;
+		boost::system::error_code ec;
 
-			while ( true ) {
-				const auto bytes_transferred = co_await stream().async_read(rx_buffer, boost::asio::use_awaitable);
-				const std::string_view data{ static_cast<const char *>(rx_buffer.data().data()), bytes_transferred };
+		while ( true ) {
+			const auto bytes_transferred = co_await stream().async_read(rx_buffer, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+			if ( ec ) {
+				break;
+			}
 
-				handle_incoming_message(data, stream().got_text());
+			const std::string_view data{ static_cast<const char *>(rx_buffer.data().data()), bytes_transferred };
 
-				rx_buffer.consume(bytes_transferred);
-				co_await wait_for_rx_ready();
-			} // while ( ... )
-		} catch ( ... ) {
-			close();
-			throw;
-		}
+			handle_incoming_message(data, stream().got_text());
+
+			rx_buffer.consume(bytes_transferred);
+			co_await wait_for_rx_ready();
+		} // while ( ... )
 	}
 
 	/// \brief Returns the next message to be sent.
@@ -260,10 +258,15 @@ private:
 	}
 
 	boost::asio::awaitable<void> accept_loop() {
+		boost::system::error_code ec;
+
 		while ( true ) {
 			boost::asio::ip::tcp::socket socket{ executor() };
 
-			co_await acceptor_.async_accept(socket, boost::asio::use_awaitable);
+			co_await acceptor_.async_accept(socket, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+			if ( ec ) {
+				break;
+			}
 
 			try {
 				co_await session_loop(std::move(socket));
@@ -280,6 +283,7 @@ private:
 		stream_type ws{ std::move(socket), ctx_ };
 #endif
 		boost::beast::flat_buffer buffer;
+		boost::system::error_code ec;
 
 #if !ASIO_STREAMS
 		// Set timeout.
@@ -291,11 +295,12 @@ private:
 		co_await ws.next_layer().async_handshake(boost::asio::ssl::stream_base::server, boost::asio::use_awaitable);
 #endif // !WITHOUT_TLS
 
-		// Turn off timeout on tcp_stream, because the websocket stream has its own
 #if !ASIO_STREAMS
+		// Turn off timeout on tcp_stream, because the websocket stream has its own
 		// timeout system.
 		boost::beast::get_lowest_layer(ws).expires_never();
 #endif
+
 		// Set suggested timeout settings for websocket.
 		ws.set_option(
 			boost::beast::websocket::stream_base::timeout::suggested(boost::beast::role_type::server)
@@ -309,9 +314,15 @@ private:
 
 		// Just echo data back to the client
 		while ( true ) {
-			const auto bytes_transferred = co_await ws.async_read(buffer, boost::asio::use_awaitable);
+			const auto bytes_transferred = co_await ws.async_read(buffer, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+			if ( ec ) {
+				break;
+			}
 
-			co_await ws.async_write(buffer.data(), boost::asio::use_awaitable);
+			co_await ws.async_write(buffer.data(), boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+			if ( ec ) {
+				break;
+			}
 
 			buffer.consume(bytes_transferred);
 		} // while ( ... )
