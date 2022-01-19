@@ -135,6 +135,10 @@ private:
 
 			co_await stream().async_write(boost::asio::buffer(tx_message), boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 		} // while ( ... )
+
+		if ( ec ) {
+			std::cerr << "write: " << ec << ":" << ec.message() << '\n';
+		}
 	}
 
 	/// Handles reading incoming messages.
@@ -145,6 +149,7 @@ private:
 		while ( true ) {
 			const auto bytes_transferred = co_await stream().async_read(rx_buffer, boost::asio::redirect_error(boost::asio::use_awaitable, ec));
 			if ( ec ) {
+				std::cerr << "read: " << ec << ":" << ec.message() << '\n';
 				break;
 			}
 
